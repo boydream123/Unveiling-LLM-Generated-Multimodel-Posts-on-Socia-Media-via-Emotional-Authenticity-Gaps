@@ -156,7 +156,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_path", type=str, default="./flickr30k_data", help="Path to the directory containing Flickr30k data (images/ and captions.token)")
     parser.add_argument("--lmm_model_name", type=str, default="Qwen/Qwen2-VL-1.5B-Instruct", help="LMM backbone model name from Hugging Face Hub")
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size")
-    parser.add-argument("--epochs", type=int, default=3, help="Number of training epochs")
+    parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate")
     parser.add_argument("--lambda_emo", type=float, default=0.1, help="Weight for the auxiliary emotion loss")
     parser.add_argument("--save_path", type=str, default="checkpoints/best_eagle_flickr30k.pth", help="Path to save the best model heads")
