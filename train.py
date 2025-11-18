@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
-from torch.optim import AdamW  # CORRECTED: Import AdamW from torch.optim
+from torch.optim import AdamW
 from transformers import AutoProcessor
 from PIL import Image
 from tqdm import tqdm
@@ -15,41 +15,43 @@ from model import EAGLE
 from dataset import EAGLEDataset
 from affective_module import AffectiveModule
 
-def load_mvsa_samples(data_dir, label_file, text_dir, llm_fraction=0.5):
+def load_flickr30k_samples(data_dir, llm_fraction=0.5):
     """
-    Loads and prepares the MVSA dataset samples, simulating a mixed human/LLM scenario.
+    Loads and prepares the Flickr30k dataset samples.
+    Each image has 5 captions, we treat each image-caption pair as a unique sample.
     """
-    print("Loading MVSA dataset...")
+    print("Loading Flickr30k dataset...")
     samples = []
     
-    try:
-        labels_df = pd.read_csv(label_file, header=None, names=['id', 'sentiment'])
-    except FileNotFoundError:
-        print(f"Error: Label file not found at {label_file}")
-        print("Please download the MVSA dataset and place it correctly.")
+    images_dir = os.path.join(data_dir, "images")
+    captions_file = os.path.join(data_dir, "captions.token")
+
+    if not os.path.isdir(images_dir) or not os.path.isfile(captions_file):
+        print(f"Error: Flickr30k data not found in {data_dir}.")
+        print("Please download the data and organize it as specified in the instructions.")
         return []
 
-    for _, row in tqdm(labels_df.iterrows(), total=len(labels_df), desc="Processing MVSA data"):
-        image_id = row['id']
-        image_path = os.path.join(data_dir, image_id)
-        text_path = os.path.join(text_dir, image_id.replace('.jpg', '.txt'))
+    # Read captions file
+    with open(captions_file, 'r', encoding='utf-8') as f:
+        captions_data = f.readlines()
+
+    for line in tqdm(captions_data, desc="Processing Flickr30k data"):
+        parts = line.strip().split('\t')
+        image_name_part, caption = parts[0], parts[1]
+        image_name = image_name_part.split('#')[0]
         
-        if os.path.exists(image_path) and os.path.exists(text_path):
-            try:
-                with open(text_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    text = f.read().strip()
-                if text:
-                    samples.append({'image_path': image_path, 'text': text})
-            except Exception as e:
-                print(f"Could not read {text_path}: {e}")
-    
+        image_path = os.path.join(images_dir, image_name)
+        
+        if os.path.exists(image_path):
+            samples.append({'image_path': image_path, 'text': caption})
+
     if not samples:
         print("No valid samples were loaded. Please check the dataset paths.")
         return []
         
-    print(f"Loaded {len(samples)} valid image-text pairs from MVSA.")
+    print(f"Loaded {len(samples)} valid image-caption pairs from Flickr30k.")
 
-    # Simulate the authenticity labels by randomly assigning half as 'LLM-generated'
+    # Simulate authenticity labels (same logic as before)
     random.shuffle(samples)
     num_llm = int(len(samples) * llm_fraction)
     for i in range(len(samples)):
@@ -69,13 +71,17 @@ def train(args):
     model.authenticity_head.to(device)
     model.emotion_head.to(device)
 
-    # --- 2. Data Preparation using MVSA ---
-    all_samples = load_mvsa_samples(
-        data_dir=os.path.join(args.dataset_path, "data"),
-        label_file=os.path.join(args.dataset_path, "labelResult_single.txt"),
-        text_dir=os.path.join(args.dataset_path, "data")
+    # --- 2. Data Preparation using Flickr30k ---
+    all_samples = load_flickr30k_samples(
+        data_dir=args.dataset_path,
     )
     if not all_samples: return
+
+    # For faster experimentation, you can use a subset of the data
+    if args.subset_size > 0:
+        print(f"Using a subset of {args.subset_size} samples for training.")
+        random.shuffle(all_samples)
+        all_samples = all_samples[:args.subset_size]
 
     train_size = int(0.9 * len(all_samples))
     val_size = len(all_samples) - train_size
@@ -101,7 +107,6 @@ def train(args):
         total_train_loss = 0
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]")
         for batch in progress_bar:
-            # Move data to device and perform a training step
             input_ids, attention_mask, pixel_values, auth_labels, emotion_gts = (
                 batch['input_ids'].to(device), batch['attention_mask'].to(device),
                 batch['pixel_values'].to(device), batch['authenticity_label'].to(device),
@@ -120,7 +125,6 @@ def train(args):
         avg_train_loss = total_train_loss / len(train_loader)
         print(f"Epoch {epoch+1} Training finished. Average Loss: {avg_train_loss:.4f}")
 
-        # Validation step
         model.eval()
         total_val_loss = 0
         with torch.no_grad():
@@ -148,14 +152,15 @@ def train(args):
     print("--- Training Finished ---")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train EAGLE model with a flexible LMM backbone on the MVSA dataset")
-    parser.add_argument("--dataset_path", type=str, required=True, help="Path to the root of the MVSA-Corpus directory")
+    parser = argparse.ArgumentParser(description="Train EAGLE model with a flexible LMM backbone on the Flickr30k dataset")
+    parser.add_argument("--dataset_path", type=str, default="./flickr30k_data", help="Path to the directory containing Flickr30k data (images/ and captions.token)")
     parser.add_argument("--lmm_model_name", type=str, default="Qwen/Qwen2-VL-1.5B-Instruct", help="LMM backbone model name from Hugging Face Hub")
-    parser.add_argument("--batch_size", type=int, default=2, help="Batch size (keep small for large models)")
-    parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate for the optimizer")
-    parser.add_argument("--lambda_emo", type=float, default=0.1, help="Weight for the auxiliary emotion loss term")
-    parser.add_argument("--save_path", type=str, default="checkpoints/best_eagle_heads.pth", help="Path to save the best trained model heads")
+    parser.add_argument("--batch_size", type=int, default=2, help="Batch size")
+    parser.add-argument("--epochs", type=int, default=3, help="Number of training epochs")
+    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate")
+    parser.add_argument("--lambda_emo", type=float, default=0.1, help="Weight for the auxiliary emotion loss")
+    parser.add_argument("--save_path", type=str, default="checkpoints/best_eagle_flickr30k.pth", help="Path to save the best model heads")
+    parser.add_argument("--subset_size", type=int, default=1000, help="Use a smaller subset of the dataset for quick testing. Set to -1 to use all data.")
     
     args = parser.parse_args()
     train(args)
