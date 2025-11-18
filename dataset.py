@@ -14,17 +14,18 @@ class EAGLEDataset(Dataset):
         self.processor = processor
         self.affective_module = affective_module
         
-        # Pre-compute emotion vectors to speed up training
         print("Pre-computing emotion vectors for the dataset...")
         self.emotion_vectors = []
         texts_to_process = [sample['text'] for sample in self.samples]
         
-        # Process in batches for efficiency
         batch_size = 32 
         for i in tqdm(range(0, len(texts_to_process), batch_size), desc="Computing Emotions"):
             batch_texts = texts_to_process[i:i + batch_size]
             with torch.no_grad():
-                batch_vectors = self.affective_module.get_emotion_vector(batch_texts)
+                # --- THIS IS THE CORRECTED LINE ---
+                # Call the affective_module object directly, as it has a __call__ method.
+                batch_vectors = self.affective_module(batch_texts)
+                # --- END OF CORRECTION ---
             self.emotion_vectors.extend(batch_vectors)
 
     def __len__(self):
@@ -41,17 +42,11 @@ class EAGLEDataset(Dataset):
             image = Image.open(image_path).convert("RGB")
         except Exception as e:
             print(f"Warning: Could not load image {image_path}. Skipping. Error: {e}")
-            # Return a dummy sample or handle appropriately
-            # For simplicity, we can try getting the next item
             return self.__getitem__((idx + 1) % len(self))
 
-        # --- THIS IS THE CORRECTED LINE ---
-        # Explicitly name the 'text' argument to avoid ambiguity.
         prompt = f"<|im_start|>user\nPicture 1:<img>{image_path}</img>\n{text}<|im_end|><|im_start|>assistant\n"
         inputs = self.processor(text=[prompt], images=[image], return_tensors="pt", padding=True)
-        # --- END OF CORRECTION ---
 
-        # Squeeze batch dimension added by processor
         inputs = {key: val.squeeze(0) for key, val in inputs.items()}
         
         return {
