@@ -1,67 +1,62 @@
-# model.py (Corrected for newer models like Qwen2.5-VL)
+# model.py
 import torch
 import torch.nn as nn
-# CHANGE 1: Import the more general AutoModel instead of the specific AutoModelForCausalLM
-from transformers import AutoModel 
+from transformers import AutoModelForCausalLM
 
-class EAGLE(nn.Module):
+class EAGLEModel(nn.Module):
     """
-    The PyTorch implementation of the EAGLE model.
-    Updated to be compatible with newer VLMs like Qwen2.5-VL.
+    The main EAGLE model which integrates a Large Multimodal Model (LMM)
+    with two custom prediction heads: one for authenticity classification
+    and one for emotion prediction.
     """
-    def __init__(self, lmm_backbone_name, num_emotions, dropout=0.1):
-        super().__init__()
-
-        print(f"Loading LMM backbone from {lmm_backbone_name}...")
-        # CHANGE 2: Use AutoModel, which is more flexible for different architectures
-        # CHANGE 3: Use the modern `dtype` argument instead of the deprecated `torch_dtype`
-        self.lmm_backbone = AutoModel.from_pretrained(
-            lmm_backbone_name,
-            dtype=torch.bfloat16, # Use 'dtype' instead of 'torch_dtype'
-            device_map="auto",
-            trust_remote_code=True,
+    def __init__(self, lmm_model_name, num_emotions=28, freeze_lmm=True):
+        super(EAGLEModel, self).__init__()
+        
+        print(f"Loading LMM backbone from {lmm_model_name}...")
+        self.lmm = AutoModelForCausalLM.from_pretrained(
+            lmm_model_name, 
+            torch_dtype=torch.bfloat16, 
+            trust_remote_code=True
         )
 
-        # Get model dimensions
-        d_model = self.lmm_backbone.config.hidden_size
-        fused_dim = d_model + num_emotions
+        if freeze_lmm:
+            print("Freezing LMM parameters...")
+            for param in self.lmm.parameters():
+                param.requires_grad = False
+        
+        # The hidden size of the LMM (e.g., 4096 for LLaMA-7B)
+        hidden_size = self.lmm.config.hidden_size
+        
+        # Define the prediction heads
+        self.authenticity_head = nn.Linear(hidden_size, 2)  # Binary classification: Human vs. LLM
+        self.emotion_head = nn.Linear(hidden_size, num_emotions)
 
-        # Authenticity Head (Primary Task)
-        self.authenticity_head = nn.Sequential(
-            nn.Linear(fused_dim, fused_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(fused_dim // 2, 2)
-        )
-
-        # Emotion Head (Auxiliary Task)
-        self.emotion_head = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
-            nn.ReLU(),
-            nn.Linear(d_model // 2, num_emotions)
-        )
-
-    def forward(self, input_ids, attention_mask, pixel_values, emotion_vectors_pe):
-        # The Qwen2.5-VL model requires pixel_values as a list
-        # We need to handle the batched tensor correctly
-        b, c, h, w = pixel_values.shape
-        pixel_values_list = [pv for pv in pixel_values]
-
-        outputs = self.lmm_backbone(
+    def forward(self, input_ids, attention_mask, pixel_values):
+        # Get the outputs from the LMM backbone
+        # We need the hidden states, not the language modeling logits
+        outputs = self.lmm(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            pixel_values=pixel_values_list, # Pass pixel_values as a list
+            pixel_values=pixel_values,
             output_hidden_states=True
         )
         
-        last_hidden_states = outputs.hidden_states[-1]
+        # Get the hidden states from the last layer
+        hidden_states = outputs.hidden_states[-1]
         
-        sequence_lengths = attention_mask.sum(dim=1) - 1
-        hmm = last_hidden_states[torch.arange(last_hidden_states.size(0), device=last_hidden_states.device), sequence_lengths]
+        # Use the hidden state of the last token as the pooled representation
+        # This is a common strategy for sequence classification with causal LMs
+        # Shape: (batch_size, sequence_length, hidden_size)
+        # We take the features corresponding to the last non-padding token
+        sequence_lengths = torch.ne(input_ids, self.lmm.config.pad_token_id).sum(-1) - 1
+        pooled_features = hidden_states[torch.arange(hidden_states.size(0), device=hidden_states.device), sequence_lengths]
 
-        h_fused = torch.cat([hmm, emotion_vectors_pe], dim=-1)
+        # Pass the pooled features through the prediction heads
+        auth_logits = self.authenticity_head(pooled_features)
+        emotion_logits = self.emotion_head(pooled_features)
+        
+        return {
+            'authenticity_logits': auth_logits,
+            'emotion_logits': emotion_logits
+        }
 
-        auth_logits = self.authenticity_head(h_fused)
-        emotion_predictions = self.emotion_head(hmm)
-
-        return auth_logits, emotion_predictions

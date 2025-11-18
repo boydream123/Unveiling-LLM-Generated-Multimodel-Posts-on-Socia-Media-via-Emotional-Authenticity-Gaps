@@ -5,40 +5,35 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 class AffectiveModule(nn.Module):
     """
-    A wrapper for a pre-trained emotion classifier.
-    The weights of this module will be frozen during the EAGLE training process.
+    A wrapper for a pre-trained emotion classification model.
+    This module is used to generate ground-truth emotion vectors for text.
+    Its parameters are frozen during the training of the main EAGLE model.
     """
-    def __init__(self, model_name="SamLowe/roberta-base-go_emotions", device="cpu"):
-        """
-        Args:
-            model_name (str): The name of the emotion classification model on the Hugging Face Hub.
-            device (str): The device to load the model on.
-        """
-        super().__init__()
+    def __init__(self, model_name, device):
+        super(AffectiveModule, self).__init__()
+        self.device = device
+        
         print(f"Loading Affective Module from {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
-        self.model.to(device)
-        self.model.eval()  # Set to evaluation mode permanently
+        self.model = AutoModelForSequenceClassification.from_pretrained(model_name).to(self.device)
+        
+        # Freeze the parameters of the affective model
+        for param in self.model.parameters():
+            param.requires_grad = False
+        
+        self.model.eval()
 
     @torch.no_grad()
-    def forward(self, texts):
+    def __call__(self, texts):
         """
-        Extracts emotion logits from a batch of texts.
-
-        Args:
-            texts (list[str]): A list of text strings.
-
-        Returns:
-            torch.Tensor: Emotion logits with shape [batch_size, num_emotions].
+        Takes a list of texts and returns their emotion vectors.
+        The object is callable directly, e.g., affective_module(texts).
         """
-        inputs = self.tokenizer(
-            texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=128
-        ).to(self.model.device)
-
+        inputs = self.tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
         outputs = self.model(**inputs)
-        return outputs.logits
+        
+        # Apply softmax to get probability distributions (emotion vectors)
+        probabilities = torch.softmax(outputs.logits, dim=-1)
+        
+        return probabilities.cpu()
+
